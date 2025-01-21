@@ -1,8 +1,7 @@
 use anyhow::Result;
-// use async_trait::async_trait;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::HashMap;
 
 use crate::types::{Message, Role};
 
@@ -38,7 +37,7 @@ pub struct MemoryMetadata {
     pub source: String,
 }
 
-// #[async_trait]
+#[async_trait]
 pub trait LongTermMemory: Send + Sync {
     // 存储记忆
     async fn store(&mut self, entry: MemoryEntry) -> Result<()>;
@@ -91,7 +90,7 @@ pub(crate) mod tests {
         }
     }
 
-    // #[async_trait]
+    #[async_trait]
     impl LongTermMemory for MockLongTermMemory {
         async fn store(&mut self, entry: MemoryEntry) -> Result<()> {
             self.memories.push(entry);

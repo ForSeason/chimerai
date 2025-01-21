@@ -281,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_tool_execution() {
-        let mut agent = create_test_agent();
+        let agent = create_test_agent();
 
         // 测试工具执行
         let result = agent
@@ -427,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_tool_chain() {
-        let mut agent = create_test_agent();
+        let agent = create_test_agent();
 
         // 1. 执行第一个工具
         let result1 = agent

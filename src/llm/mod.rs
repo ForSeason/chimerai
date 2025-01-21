@@ -1,13 +1,12 @@
-// use async_trait::async_trait;
+use async_trait::async_trait;
 use anyhow::Result;
 use futures::{Stream, StreamExt};
-use serde_json::Value;
 use std::pin::Pin;
 
 use crate::tools::Tool;
 use crate::types::{Decision, Message};
 
-// #[async_trait]
+#[async_trait]
 pub trait LLMClient: Send + Sync {
     async fn complete(
         &self,
@@ -40,7 +39,7 @@ pub(crate) mod tests {
         }
     }
 
-    // #[async_trait]
+    #[async_trait]
     impl LLMClient for MockLLMClient {
         async fn complete(
             &self,

@@ -1,11 +1,11 @@
 use anyhow::Result;
-// use async_trait::async_trait;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt::Debug;
 
 use crate::types::ToolExecutionResult;
 
-// #[async_trait]
+#[async_trait]
 pub trait Tool: Send + Sync + Debug {
     /// 工具的唯一名称
     fn name(&self) -> String;
@@ -44,7 +44,7 @@ pub(crate) mod tests {
         }
     }
 
-    // #[async_trait]
+    #[async_trait]
     impl Tool for EchoTool {
         fn name(&self) -> String {
             "echo".to_string()
