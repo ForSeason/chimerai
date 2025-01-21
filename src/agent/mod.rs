@@ -51,20 +51,10 @@ where
     }
 
     fn prepare_context(&mut self) -> Vec<Message> {
-        let mut context = vec![Message {
-            role: Role::System,
-            content: self.config.system_prompt.clone(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        }];
-
-        // 添加短期记忆中的对话历史
-        context.extend(self.short_term_memory.get_context());
-
-        // 裁剪确保不超过token限制
+        // 先获取裁剪后的上下文
         let trimmed = self.short_term_memory.trim_context(self.config.max_tokens);
-
-        // 重新构建完整上下文
+        
+        // 构建最终上下文，只在开头插入系统提示
         let mut final_context = vec![Message {
             role: Role::System,
             content: self.config.system_prompt.clone(),
@@ -76,14 +66,15 @@ where
     }
 
     fn update_context(&mut self) -> Vec<Message> {
-        // 始终包含系统提示
         let mut context = vec![Message {
             role: Role::System,
             content: self.config.system_prompt.clone(),
             timestamp: chrono::Utc::now(),
             metadata: None,
         }];
-        context.extend(self.short_term_memory.get_context());
+        
+        // 现在我们可以直接使用切片，不需要 to_vec
+        context.extend_from_slice(self.short_term_memory.get_context());
         context
     }
 
@@ -194,7 +185,7 @@ where
         let tools: Vec<Box<dyn Tool>> = self.tools.values().map(|tool| tool.clone()).collect();
 
         self.llm
-            .complete(messages.to_vec(), tools, Some(self.config.max_tokens))
+            .complete(messages, tools, Some(self.config.max_tokens))
             .await
     }
 
@@ -323,9 +314,9 @@ mod tests {
         assert_eq!(context.len(), 4); // 2*(user + assistant)
 
         // 3. 验证最近的对话
-        let recent = agent.short_term_memory.get_recent_turns(2);
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].content, "Echo: Second message");
+        let recent_messages = agent.short_term_memory.get_context();
+        assert!(!recent_messages.is_empty());
+        assert_eq!(recent_messages.last().unwrap().content, "Echo: Second message");
 
         // 4. 测试长期记忆存储和检索
         let test_data = serde_json::json!({
@@ -414,7 +405,7 @@ mod tests {
         assert_eq!(response, "Echo: How are you?");
 
         // 3. 验证对话历史
-        let context = agent.short_term_memory.get_context();
+        let context = agent.short_term_memory.get_context().to_vec();
         assert_eq!(context.len(), 4); // 2*(user + assistant)
 
         // 4. 测试上下文裁剪

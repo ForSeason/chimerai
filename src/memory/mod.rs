@@ -51,10 +51,9 @@ pub trait LongTermMemory: Send + Sync {
 
 pub trait ShortTermMemory: Send + Sync {
     fn add_message(&mut self, role: Role, content: String);
-    fn get_context(&self) -> Vec<Message>;
+    fn get_context(&self) -> &[Message];
     fn clear_context(&mut self);
     fn trim_context(&mut self, max_tokens: usize) -> Vec<Message>;
-    fn get_recent_turns(&self, n: usize) -> Vec<Message>;
 }
 
 #[cfg(test)]
@@ -258,8 +257,8 @@ pub(crate) mod tests {
             });
         }
 
-        fn get_context(&self) -> Vec<Message> {
-            self.messages.clone()
+        fn get_context(&self) -> &[Message] {
+            &self.messages
         }
 
         fn clear_context(&mut self) {
@@ -284,10 +283,6 @@ pub(crate) mod tests {
             result.reverse();
             result
         }
-
-        fn get_recent_turns(&self, n: usize) -> Vec<Message> {
-            self.messages.iter().rev().take(n).cloned().collect()
-        }
     }
 
     #[test]
@@ -306,10 +301,5 @@ pub(crate) mod tests {
         // Test trimming
         let trimmed = memory.trim_context(5); // Only allow ~5 tokens
         assert_eq!(trimmed.len(), 2); // Both messages should fit as they're very short
-
-        // Test recent turns
-        let recent = memory.get_recent_turns(1);
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].role, Role::Assistant);
     }
 }

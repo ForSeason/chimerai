@@ -10,14 +10,14 @@ use crate::types::{Decision, Message};
 pub trait LLMClient: Send + Sync {
     async fn complete(
         &self,
-        messages: Vec<Message>,
+        messages: &[Message],
         tools: Vec<Box<dyn Tool>>,
         max_tokens: Option<usize>,
     ) -> Result<Decision>;
 
     async fn stream_complete(
         &self,
-        messages: Vec<Message>,
+        messages: &[Message],
         tools: Vec<Box<dyn Tool>>,
         max_tokens: Option<usize>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>>;
@@ -29,7 +29,6 @@ pub(crate) mod tests {
     use crate::types::{AssistantResponse, Role};
     use chrono::Utc;
 
-    // 将MockLLMClient移到测试模块中
     #[derive(Debug, Default)]
     pub struct MockLLMClient;
 
@@ -43,7 +42,7 @@ pub(crate) mod tests {
     impl LLMClient for MockLLMClient {
         async fn complete(
             &self,
-            messages: Vec<Message>,
+            messages: &[Message],
             _tools: Vec<Box<dyn Tool>>,
             _max_tokens: Option<usize>,
         ) -> Result<Decision> {
@@ -62,7 +61,7 @@ pub(crate) mod tests {
 
         async fn stream_complete(
             &self,
-            messages: Vec<Message>,
+            messages: &[Message],
             tools: Vec<Box<dyn Tool>>,
             max_tokens: Option<usize>,
         ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>> {
@@ -80,9 +79,10 @@ pub(crate) mod tests {
             timestamp: Utc::now(),
             metadata: None,
         };
+        let messages = vec![message.clone()];
 
         let response = client
-            .complete(vec![message.clone()], vec![], Some(100))
+            .complete(&messages, vec![], Some(100))
             .await
             .unwrap();
 
@@ -95,7 +95,7 @@ pub(crate) mod tests {
 
         // Test stream
         let mut stream = client
-            .stream_complete(vec![message], vec![], Some(100))
+            .stream_complete(&messages, vec![], Some(100))
             .await
             .unwrap();
 
