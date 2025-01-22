@@ -72,7 +72,7 @@ pub enum ToolExecutionResult {
 pub struct AgentConfig {
     pub system_prompt: String,
     pub max_turns: usize,
-    pub max_tokens: usize,
+    pub max_tokens: Option<usize>,
     pub enable_parallel: bool,
     pub retry_config: RetryConfig,
     pub temperature: f32,
@@ -100,7 +100,7 @@ impl Default for AgentConfig {
         Self {
             system_prompt: "You are a helpful AI assistant.".to_string(),
             max_turns: 10,
-            max_tokens: 2048,
+            max_tokens: Some(2048),
             enable_parallel: false,
             retry_config: RetryConfig {
                 max_retries: 3,

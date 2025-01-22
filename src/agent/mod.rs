@@ -5,9 +5,9 @@ use tokio::time::timeout;
 
 use crate::{
     llm::LLMClient,
-    memory::{LongTermMemory, MemoryEntry, MemoryMetadata, MemoryQuery, ShortTermMemory},
+    memory::{LongTermMemory, MemoryEntry, MemoryMetadata, ShortTermMemory},
     tools::Tool,
-    types::{AgentConfig, AgentState, Decision, Message, RetryConfig, Role, ToolExecutionResult},
+    types::{AgentConfig, AgentState, Decision, Message, Role, ToolExecutionResult},
 };
 
 pub struct Agent<M, H, L>
@@ -42,40 +42,16 @@ where
     }
 
     pub fn with_config(mut self, config: AgentConfig) -> Self {
+        self.short_term_memory.add_message(
+            Role::System,
+            config.system_prompt.clone(),
+        );
         self.config = config;
         self
     }
 
     pub fn register_tool<T: Tool + 'static>(&mut self, tool: T) {
         self.tools.insert(tool.name(), Box::new(tool));
-    }
-
-    fn prepare_context(&mut self) -> Vec<Message> {
-        // 先获取裁剪后的上下文
-        let trimmed = self.short_term_memory.trim_context(self.config.max_tokens);
-        
-        // 构建最终上下文，只在开头插入系统提示
-        let mut final_context = vec![Message {
-            role: Role::System,
-            content: self.config.system_prompt.clone(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        }];
-        final_context.extend(trimmed);
-        final_context
-    }
-
-    fn update_context(&mut self) -> Vec<Message> {
-        let mut context = vec![Message {
-            role: Role::System,
-            content: self.config.system_prompt.clone(),
-            timestamp: chrono::Utc::now(),
-            metadata: None,
-        }];
-        
-        // 现在我们可以直接使用切片，不需要 to_vec
-        context.extend_from_slice(self.short_term_memory.get_context());
-        context
     }
 
     pub async fn handle_message(&mut self, message: String) -> Result<String> {
@@ -88,8 +64,8 @@ where
         // 2. 添加用户消息到短期记忆
         self.short_term_memory.add_message(Role::User, message);
 
-        // 3. 获取完整上下文（包含系统提示）
-        let mut context = self.prepare_context();
+        // 3. 获取裁剪后的上下文
+        let mut context = self.short_term_memory.get_context_messages(self.config.max_tokens);
 
         // 4. 循环处理直到得到最终响应
         let mut retries = 0;
@@ -111,13 +87,13 @@ where
                                 .await?
                             {
                                 ToolExecutionResult::Success { output, metadata } => {
-                                    // 将工具执行结果作为用户消息添加到上下文，并明确表示这是工具执行的结果
+                                    // 将工具执行结果作为工具消息添加到上下文
                                     self.short_term_memory.add_message(
-                                        Role::User,
+                                        Role::Tool,
                                         format!("工具执行成功。结果是：{}", output),
                                     );
-                                    // 更新上下文，包含系统提示和对话历史
-                                    context = self.update_context();
+                                    // 获取新的上下文
+                                    context = self.short_term_memory.get_context_messages(self.config.max_tokens);
                                     // 存储相关信息到长期记忆
                                     if let Some(metadata) = metadata {
                                         self.store_tool_result(&tool_args.tool_name, metadata)
@@ -136,7 +112,18 @@ where
                                             .await;
                                         continue;
                                     }
-                                    return Err(anyhow!("Tool execution failed: {}", error));
+
+                                    // 添加失败信息到上下文中，同时提供后续处理建议
+                                    self.short_term_memory.add_message(
+                                        Role::Tool,
+                                        format!(
+                                            "工具 {} 执行失败（错误信息：{}）。由于无法重试，请考虑使用其他方式解决问题或给出合适的响应。",
+                                            tool_args.tool_name,
+                                            error
+                                        ),
+                                    );
+                                    context = self.short_term_memory.get_context_messages(self.config.max_tokens);
+                                    continue;
                                 }
                                 ToolExecutionResult::NeedMoreInfo { missing_fields } => {
                                     self.state = AgentState::WaitingForUserInput;
@@ -168,7 +155,8 @@ where
                         }
                     }
                 }
-                Err(_) => {
+                Err(err) => {
+                    println!("running error: {}", err);
                     if retries < self.config.retry_config.max_retries {
                         retries += 1;
                         continue;
@@ -185,7 +173,7 @@ where
         let tools: Vec<Box<dyn Tool>> = self.tools.values().map(|tool| tool.clone()).collect();
 
         self.llm
-            .complete(messages, tools, Some(self.config.max_tokens))
+            .complete(messages, tools, self.config.max_tokens)
             .await
     }
 
@@ -405,11 +393,11 @@ mod tests {
         assert_eq!(response, "Echo: How are you?");
 
         // 3. 验证对话历史
-        let context = agent.short_term_memory.get_context().to_vec();
+        let context = agent.short_term_memory.get_context_messages(None); // 获取所有消息
         assert_eq!(context.len(), 4); // 2*(user + assistant)
 
         // 4. 测试上下文裁剪
-        let trimmed = agent.short_term_memory.trim_context(50);
+        let trimmed = agent.short_term_memory.get_context_messages(Some(50));
         assert!(trimmed.len() <= context.len());
 
         // 5. 验证状态
@@ -444,7 +432,7 @@ mod tests {
         }
 
         // 4. 验证工具调用历史
-        let context = agent.short_term_memory.get_context();
+        let context = agent.short_term_memory.get_context_messages(None);
         let tool_messages = context
             .iter()
             .filter(|m| matches!(m.role, Role::Tool))

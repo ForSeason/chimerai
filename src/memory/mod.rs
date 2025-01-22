@@ -50,10 +50,12 @@ pub trait LongTermMemory: Send + Sync {
 }
 
 pub trait ShortTermMemory: Send + Sync {
+    /// 添加一条消息到短期记忆
     fn add_message(&mut self, role: Role, content: String);
-    fn get_context(&self) -> &[Message];
-    fn clear_context(&mut self);
-    fn trim_context(&mut self, max_tokens: usize) -> Vec<Message>;
+
+    /// 获取当前的对话上下文，根据 token 限制进行裁剪
+    /// 如果 max_tokens 为 None，则返回所有消息
+    fn get_context_messages(&self, max_tokens: Option<usize>) -> Vec<Message>;
 }
 
 #[cfg(test)]
@@ -257,31 +259,27 @@ pub(crate) mod tests {
             });
         }
 
-        fn get_context(&self) -> &[Message] {
-            &self.messages
-        }
+        fn get_context_messages(&self, max_tokens: Option<usize>) -> Vec<Message> {
+            if let Some(max_tokens) = max_tokens {
+                let mut total_tokens = 0;
+                let mut result = Vec::new();
 
-        fn clear_context(&mut self) {
-            self.messages.clear();
-        }
-
-        fn trim_context(&mut self, max_tokens: usize) -> Vec<Message> {
-            let mut total_tokens = 0;
-            let mut result = Vec::new();
-
-            // 从最新的消息开始添加
-            for message in self.messages.iter().rev() {
-                let tokens = Self::estimate_tokens(&message.content);
-                if total_tokens + tokens > max_tokens {
-                    break;
+                // 从最新的消息开始添加
+                for message in self.messages.iter().rev() {
+                    let tokens = Self::estimate_tokens(&message.content);
+                    if total_tokens + tokens > max_tokens {
+                        break;
+                    }
+                    total_tokens += tokens;
+                    result.push(message.clone());
                 }
-                total_tokens += tokens;
-                result.push(message.clone());
-            }
 
-            // 反转回正常顺序
-            result.reverse();
-            result
+                // 反转回正常顺序
+                result.reverse();
+                result
+            } else {
+                self.messages.clone()
+            }
         }
     }
 
@@ -293,13 +291,7 @@ pub(crate) mod tests {
         memory.add_message(Role::User, "Hello".to_string());
         memory.add_message(Role::Assistant, "Hi".to_string());
 
-        let context = memory.get_context();
-        assert_eq!(context.len(), 2);
-        assert_eq!(context[0].role, Role::User);
-        assert_eq!(context[0].content, "Hello");
-
-        // Test trimming
-        let trimmed = memory.trim_context(5); // Only allow ~5 tokens
-        assert_eq!(trimmed.len(), 2); // Both messages should fit as they're very short
+        let context = memory.get_context_messages(Some(5)); // Only allow ~5 tokens
+        assert_eq!(context.len(), 2); // Both messages should fit as they're very short
     }
 }
