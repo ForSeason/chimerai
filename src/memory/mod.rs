@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::types::{Message, Role};
+use crate::types::Message;
 
 // 记忆查询
 #[derive(Debug)]
@@ -51,7 +51,7 @@ pub trait LongTermMemory: Send + Sync {
 
 pub trait ShortTermMemory: Send + Sync {
     /// 添加一条消息到短期记忆
-    fn add_message(&mut self, role: Role, content: String);
+    fn add_message(&mut self, message: Message);
 
     /// 获取当前的对话上下文，根据 token 限制进行裁剪
     /// 如果 max_tokens 为 None，则返回所有消息
@@ -250,13 +250,8 @@ pub(crate) mod tests {
     }
 
     impl ShortTermMemory for BasicShortTermMemory {
-        fn add_message(&mut self, role: Role, content: String) {
-            self.messages.push(Message {
-                role,
-                content,
-                timestamp: chrono::Utc::now(),
-                metadata: None,
-            });
+        fn add_message(&mut self, message: Message) {
+            self.messages.push(message);
         }
 
         fn get_context_messages(&self, max_tokens: Option<usize>) -> Vec<Message> {
@@ -266,7 +261,14 @@ pub(crate) mod tests {
 
                 // 从最新的消息开始添加
                 for message in self.messages.iter().rev() {
-                    let tokens = Self::estimate_tokens(&message.content);
+                    let content = match message {
+                        Message::Developer(inner_message) => inner_message.content.as_str(),
+                        Message::System(inner_message) => inner_message.content.as_str(),
+                        Message::User(inner_message) => inner_message.content.as_str(),
+                        Message::Assistant(inner_message) => inner_message.content.as_str(),
+                        Message::Tool(inner_message, _) => inner_message.content.as_str(),
+                    };
+                    let tokens = Self::estimate_tokens(content);
                     if total_tokens + tokens > max_tokens {
                         break;
                     }
@@ -288,8 +290,16 @@ pub(crate) mod tests {
         let mut memory = BasicShortTermMemory::new();
 
         // Test adding and retrieving messages
-        memory.add_message(Role::User, "Hello".to_string());
-        memory.add_message(Role::Assistant, "Hi".to_string());
+        memory.add_message(Message::User(crate::types::InnerMessage {
+            content: "Hello".to_string(),
+            name: None,
+            metadata: None,
+        }));
+        memory.add_message(Message::Assistant(crate::types::InnerMessage {
+            content: "Hi".to_string(),
+            name: None,
+            metadata: None,
+        }));
 
         let context = memory.get_context_messages(Some(5)); // Only allow ~5 tokens
         assert_eq!(context.len(), 2); // Both messages should fit as they're very short

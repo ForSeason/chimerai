@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use anyhow::Result;
-use futures::{Stream, StreamExt};
+use async_trait::async_trait;
+use futures::*;
 use std::pin::Pin;
 
 use crate::tools::Tool;
@@ -26,8 +26,7 @@ pub trait LLMClient: Send + Sync {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::types::{AssistantResponse, Role};
-    use chrono::Utc;
+    use crate::types::AssistantResponse;
 
     #[derive(Debug, Default)]
     pub struct MockLLMClient;
@@ -46,9 +45,9 @@ pub(crate) mod tests {
             _tools: Vec<Box<dyn Tool>>,
             _max_tokens: Option<usize>,
         ) -> Result<Decision> {
-            if let Some(last_message) = messages.last() {
+            if let Some(Message::User(inner)) = messages.last() {
                 Ok(Decision::Respond(AssistantResponse {
-                    content: format!("Echo: {}", last_message.content),
+                    content: format!("Echo: {}", inner.content),
                     metadata: None,
                 }))
             } else {
@@ -73,18 +72,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_mock_llm_client() {
         let client = MockLLMClient::new();
-        let message = Message {
-            role: Role::User,
+        let message = Message::User(crate::types::InnerMessage {
             content: "Hello".to_string(),
-            timestamp: Utc::now(),
+            name: None,
             metadata: None,
-        };
+        });
         let messages = vec![message.clone()];
 
-        let response = client
-            .complete(&messages, vec![], Some(100))
-            .await
-            .unwrap();
+        let response = client.complete(&messages, vec![], Some(100)).await.unwrap();
 
         match response {
             Decision::Respond(response) => {

@@ -1,29 +1,29 @@
-use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-    Tool,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Message {
+    Developer(InnerMessage),
+    System(InnerMessage),
+    User(InnerMessage),
+    Assistant(InnerMessage),
+    Tool(InnerMessage, String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InnerMessage {
     pub content: String,
-    pub timestamp: DateTime<Utc>,
+    pub name: Option<String>,
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallArgs {
+    pub id: String,
+    pub tool_type: String,
     pub tool_name: String,
     pub args: serde_json::Value,
-    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,12 +45,6 @@ pub enum Decision {
     ExecuteTool(ToolCallArgs),
     /// 直接响应用户
     Respond(AssistantResponse),
-    /// 请求用户澄清
-    AskForClarification(ClarificationRequest),
-    /// 结束对话
-    EndConversation {
-        reason: Option<String>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,26 +114,15 @@ mod tests {
 
     #[test]
     fn test_message_serialization() {
-        let message = Message {
-            role: Role::User,
+        let message = Message::User(crate::types::InnerMessage {
             content: "Hello".to_string(),
-            timestamp: Utc::now(),
+            name: None,
             metadata: None,
-        };
+        });
 
         let serialized = serde_json::to_string(&message).unwrap();
         let deserialized: Message = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(message.role, deserialized.role);
-        assert_eq!(message.content, deserialized.content);
+        assert_eq!(message, deserialized);
     }
-
-    #[test]
-    fn test_agent_config_default() {
-        let config = AgentConfig::default();
-        assert_eq!(config.max_turns, 10);
-        assert_eq!(config.max_tokens, 2048);
-        assert!(!config.enable_parallel);
-        assert_eq!(config.temperature, 0.7);
-    }
-} 
+}

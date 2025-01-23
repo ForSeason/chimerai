@@ -7,7 +7,7 @@ use crate::{
     llm::LLMClient,
     memory::{LongTermMemory, MemoryEntry, MemoryMetadata, ShortTermMemory},
     tools::Tool,
-    types::{AgentConfig, AgentState, Decision, Message, Role, ToolExecutionResult},
+    types::{AgentConfig, AgentState, Decision, InnerMessage, Message, ToolExecutionResult},
 };
 
 pub struct Agent<M, H, L>
@@ -42,10 +42,12 @@ where
     }
 
     pub fn with_config(mut self, config: AgentConfig) -> Self {
-        self.short_term_memory.add_message(
-            Role::System,
-            config.system_prompt.clone(),
-        );
+        self.short_term_memory
+            .add_message(Message::System(InnerMessage {
+                content: config.system_prompt.clone(),
+                name: None,
+                metadata: None,
+            }));
         self.config = config;
         self
     }
@@ -62,10 +64,17 @@ where
         self.state = AgentState::Processing;
 
         // 2. 添加用户消息到短期记忆
-        self.short_term_memory.add_message(Role::User, message);
+        self.short_term_memory
+            .add_message(Message::User(InnerMessage {
+                content: message,
+                name: None,
+                metadata: None,
+            }));
 
         // 3. 获取裁剪后的上下文
-        let mut context = self.short_term_memory.get_context_messages(self.config.max_tokens);
+        let mut context = self
+            .short_term_memory
+            .get_context_messages(self.config.max_tokens);
 
         // 4. 循环处理直到得到最终响应
         let mut retries = 0;
@@ -76,24 +85,24 @@ where
                     let decision = decision_result?;
                     match decision {
                         Decision::ExecuteTool(tool_args) => {
-                            // 先记录 assistant 的决定
-                            self.short_term_memory.add_message(
-                                Role::Assistant,
-                                format!("我需要使用 {} 工具来执行这个计算", tool_args.tool_name),
-                            );
-
                             match self
                                 .execute_tool(&tool_args.tool_name, tool_args.args)
                                 .await?
                             {
                                 ToolExecutionResult::Success { output, metadata } => {
                                     // 将工具执行结果作为工具消息添加到上下文
-                                    self.short_term_memory.add_message(
-                                        Role::Tool,
-                                        format!("工具执行成功。结果是：{}", output),
-                                    );
-                                    // 获取新的上下文
-                                    context = self.short_term_memory.get_context_messages(self.config.max_tokens);
+                                    self.short_term_memory.add_message(Message::Tool(
+                                        InnerMessage {
+                                            content: format!("工具执行成功。结果是：{}", output),
+                                            name: None,
+                                            metadata: None,
+                                        },
+                                        tool_args.id,
+                                    ));
+                                    // 获取上下文
+                                    context = self
+                                        .short_term_memory
+                                        .get_context_messages(self.config.max_tokens);
                                     // 存储相关信息到长期记忆
                                     if let Some(metadata) = metadata {
                                         self.store_tool_result(&tool_args.tool_name, metadata)
@@ -114,15 +123,21 @@ where
                                     }
 
                                     // 添加失败信息到上下文中，同时提供后续处理建议
-                                    self.short_term_memory.add_message(
-                                        Role::Tool,
-                                        format!(
+                                    self.short_term_memory.add_message(Message::Tool(
+                                        InnerMessage {
+                                            content: format!(
                                             "工具 {} 执行失败（错误信息：{}）。由于无法重试，请考虑使用其他方式解决问题或给出合适的响应。",
                                             tool_args.tool_name,
                                             error
-                                        ),
-                                    );
-                                    context = self.short_term_memory.get_context_messages(self.config.max_tokens);
+                                            ),
+                                            name: None,
+                                            metadata: None,
+                                        },
+                                        tool_args.id,
+                                    ));
+                                    context = self
+                                        .short_term_memory
+                                        .get_context_messages(self.config.max_tokens);
                                     continue;
                                 }
                                 ToolExecutionResult::NeedMoreInfo { missing_fields } => {
@@ -136,22 +151,13 @@ where
                         }
                         Decision::Respond(response) => {
                             self.short_term_memory
-                                .add_message(Role::Assistant, response.content.clone());
+                                .add_message(Message::Assistant(InnerMessage {
+                                    content: response.content.clone(),
+                                    name: None,
+                                    metadata: None,
+                                }));
                             self.state = AgentState::Ready;
                             return Ok(response.content);
-                        }
-                        Decision::AskForClarification(request) => {
-                            self.short_term_memory
-                                .add_message(Role::Assistant, request.question.clone());
-                            self.state = AgentState::WaitingForUserInput;
-                            return Ok(request.question);
-                        }
-                        Decision::EndConversation { reason } => {
-                            let response = reason.unwrap_or_else(|| "对话已结束".to_string());
-                            self.short_term_memory
-                                .add_message(Role::Assistant, response.clone());
-                            self.state = AgentState::Terminated;
-                            return Ok(response);
                         }
                     }
                 }
@@ -206,6 +212,7 @@ mod tests {
     use crate::{
         llm::tests::MockLLMClient,
         memory::tests::{BasicShortTermMemory, MockLongTermMemory},
+        memory::MemoryQuery,
         tools::tests::EchoTool,
     };
     use pretty_assertions::assert_eq;
@@ -223,9 +230,9 @@ mod tests {
         let config = AgentConfig {
             system_prompt: "You are a helpful assistant.".to_string(),
             max_turns: 5,
-            max_tokens: 1000,
+            max_tokens: Some(1000),
             enable_parallel: false,
-            retry_config: RetryConfig {
+            retry_config: crate::types::RetryConfig {
                 max_retries: 2,
                 retry_delay: Duration::from_millis(100),
                 should_retry_on_error: true,
@@ -250,12 +257,32 @@ mod tests {
         assert!(matches!(agent.state, AgentState::Ready));
 
         // 验证短期记忆
-        let context = agent.short_term_memory.get_context();
-        assert_eq!(context.len(), 2); // user message + assistant response
-        assert_eq!(context[0].role, Role::User);
-        assert_eq!(context[0].content, "Hello");
-        assert_eq!(context[1].role, Role::Assistant);
-        assert_eq!(context[1].content, "Echo: Hello");
+        let context = agent.short_term_memory.get_context_messages(None);
+        assert_eq!(context.len(), 3); // system message + user message + assistant response
+        assert_eq!(
+            context[0],
+            Message::System(InnerMessage {
+                content: "You are a helpful assistant.".into(),
+                name: None,
+                metadata: None
+            })
+        );
+        assert_eq!(
+            context[1],
+            Message::User(InnerMessage {
+                content: "Hello".into(),
+                name: None,
+                metadata: None
+            })
+        );
+        assert_eq!(
+            context[2],
+            Message::Assistant(InnerMessage {
+                content: "Echo: Hello".into(),
+                name: None,
+                metadata: None
+            })
+        );
     }
 
     #[tokio::test]
@@ -298,13 +325,20 @@ mod tests {
             .unwrap();
 
         // 2. 验证短期记忆内容
-        let context = agent.short_term_memory.get_context();
-        assert_eq!(context.len(), 4); // 2*(user + assistant)
+        let context = agent.short_term_memory.get_context_messages(None);
+        assert_eq!(context.len(), 5); // system + 2*(user + assistant)
 
         // 3. 验证最近的对话
-        let recent_messages = agent.short_term_memory.get_context();
+        let recent_messages = agent.short_term_memory.get_context_messages(None);
         assert!(!recent_messages.is_empty());
-        assert_eq!(recent_messages.last().unwrap().content, "Echo: Second message");
+        assert_eq!(
+            *recent_messages.last().unwrap(),
+            Message::Assistant(InnerMessage {
+                content: "Echo: Second message".into(),
+                name: None,
+                metadata: None
+            })
+        );
 
         // 4. 测试长期记忆存储和检索
         let test_data = serde_json::json!({
@@ -394,7 +428,7 @@ mod tests {
 
         // 3. 验证对话历史
         let context = agent.short_term_memory.get_context_messages(None); // 获取所有消息
-        assert_eq!(context.len(), 4); // 2*(user + assistant)
+        assert_eq!(context.len(), 5); // system + 2*(user + assistant)
 
         // 4. 测试上下文裁剪
         let trimmed = agent.short_term_memory.get_context_messages(Some(50));
@@ -435,7 +469,7 @@ mod tests {
         let context = agent.short_term_memory.get_context_messages(None);
         let tool_messages = context
             .iter()
-            .filter(|m| matches!(m.role, Role::Tool))
+            .filter(|m| matches!(m, Message::Tool(_, _)))
             .count();
         assert_eq!(tool_messages, 0); // 工具调用不会被添加到上下文中,因为我们直接调用了execute_tool
     }

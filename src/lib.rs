@@ -1,13 +1,13 @@
 pub mod agent;
+pub mod llm;
 pub mod memory;
 pub mod tools;
 pub mod types;
-pub mod llm;
 
 pub use agent::Agent;
 pub use memory::{LongTermMemory, ShortTermMemory};
 pub use tools::Tool;
-pub use types::{Decision, Message, Role};
+pub use types::{Decision, Message};
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
