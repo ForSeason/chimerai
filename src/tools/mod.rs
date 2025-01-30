@@ -3,8 +3,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt::Debug;
 
-use crate::types::ToolExecutionResult;
-
 #[async_trait]
 pub trait Tool: Send + Sync + Debug {
     /// 工具的唯一名称
@@ -18,15 +16,6 @@ pub trait Tool: Send + Sync + Debug {
 
     /// 执行工具
     async fn execute(&self, args: Value) -> Result<String>;
-
-    /// 克隆工具
-    fn box_clone(&self) -> Box<dyn Tool>;
-}
-
-impl Clone for Box<dyn Tool> {
-    fn clone(&self) -> Self {
-        self.box_clone()
-    }
 }
 
 #[cfg(test)]
@@ -75,10 +64,6 @@ pub(crate) mod tests {
 
             Ok(text.to_string())
         }
-
-        fn box_clone(&self) -> Box<dyn Tool> {
-            Box::new(self.clone())
-        }
     }
 
     #[tokio::test]
@@ -99,10 +84,5 @@ pub(crate) mod tests {
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(result.is_err());
-
-        // Test cloning
-        let boxed_tool: Box<dyn Tool> = Box::new(tool);
-        let cloned_tool = boxed_tool.clone();
-        assert_eq!(boxed_tool.name(), cloned_tool.name());
     }
 }

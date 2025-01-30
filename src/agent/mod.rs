@@ -136,7 +136,7 @@ where
     }
 
     async fn get_decision(&self, messages: &[Message]) -> Result<Decision> {
-        let tools: Vec<Box<dyn Tool>> = self.tools.values().map(|tool| tool.clone()).collect();
+        let tools: Vec<&Box<dyn Tool>> = self.tools.values().collect();
 
         self.llm
             .complete(messages, tools, self.config.max_tokens)

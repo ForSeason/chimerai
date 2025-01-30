@@ -11,14 +11,14 @@ pub trait LLMClient: Send + Sync {
     async fn complete(
         &self,
         messages: &[Message],
-        tools: Vec<Box<dyn Tool>>,
+        tools: Vec<&Box<dyn Tool>>,
         max_tokens: Option<usize>,
     ) -> Result<Decision>;
 
     async fn stream_complete(
         &self,
         messages: &[Message],
-        tools: Vec<Box<dyn Tool>>,
+        tools: Vec<&Box<dyn Tool>>,
         max_tokens: Option<usize>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>>;
 }
@@ -41,7 +41,7 @@ pub(crate) mod tests {
         async fn complete(
             &self,
             messages: &[Message],
-            _tools: Vec<Box<dyn Tool>>,
+            _tools: Vec<&Box<dyn Tool>>,
             _max_tokens: Option<usize>,
         ) -> Result<Decision> {
             if let Some(Message::User { content }) = messages.last() {
@@ -54,7 +54,7 @@ pub(crate) mod tests {
         async fn stream_complete(
             &self,
             messages: &[Message],
-            tools: Vec<Box<dyn Tool>>,
+            tools: Vec<&Box<dyn Tool>>,
             max_tokens: Option<usize>,
         ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>> {
             let response = self.complete(messages, tools, max_tokens).await?;
