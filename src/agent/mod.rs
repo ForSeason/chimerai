@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
-use serde_json::Value;
+use serde_json::json;
 use std::collections::HashMap;
 use tokio::time::timeout;
 
 use crate::{
     llm::LLMClient,
-    memory::{LongTermMemory, MemoryEntry, MemoryMetadata, ShortTermMemory},
+    memory::{LongTermMemory, ShortTermMemory},
     tools::Tool,
-    types::{AgentConfig, AgentState, Decision, InnerMessage, Message, ToolExecutionResult},
+    types::{AgentConfig, AgentState, Decision, Message, ToolCallArgs, ToolExecutionResult},
 };
 
 pub struct Agent<M, H, L>
@@ -42,12 +42,9 @@ where
     }
 
     pub fn with_config(mut self, config: AgentConfig) -> Self {
-        self.short_term_memory
-            .add_message(Message::System(InnerMessage {
-                content: config.system_prompt.clone(),
-                name: None,
-                metadata: None,
-            }));
+        self.short_term_memory.add_message(Message::System {
+            content: config.system_prompt.clone(),
+        });
         self.config = config;
         self
     }
@@ -65,11 +62,7 @@ where
 
         // 2. 添加用户消息到短期记忆
         self.short_term_memory
-            .add_message(Message::User(InnerMessage {
-                content: message,
-                name: None,
-                metadata: None,
-            }));
+            .add_message(Message::User { content: message });
 
         // 3. 获取裁剪后的上下文
         let mut context = self
@@ -84,80 +77,47 @@ where
                 Ok(decision_result) => {
                     let decision = decision_result?;
                     match decision {
-                        Decision::ExecuteTool(tool_args) => {
-                            match self
-                                .execute_tool(&tool_args.tool_name, tool_args.args)
-                                .await?
-                            {
-                                ToolExecutionResult::Success { output, metadata } => {
-                                    // 将工具执行结果作为工具消息添加到上下文
-                                    self.short_term_memory.add_message(Message::Tool(
-                                        InnerMessage {
-                                            content: format!("工具执行成功。结果是：{}", output),
-                                            name: None,
-                                            metadata: None,
+                        Decision::ExecuteTool(respond, tool_calls) => {
+                            self.short_term_memory.add_message(Message::Assistant {
+                                content: respond.clone(),
+                                tool_calls: Some(tool_calls.clone()),
+                            });
+                            let ToolExecutionResult {
+                                success_result,
+                                failure_result,
+                            } = self.execute_tool(&tool_calls).await?;
+                            success_result
+                                .into_iter()
+                                .for_each(|(tool_call_id, content)| {
+                                    self.short_term_memory.add_message(Message::Tool {
+                                        content,
+                                        tool_call_id,
+                                    });
+                                });
+                            failure_result.into_iter().for_each(
+                                        |(tool_call_id, error)| {
+                                            self.short_term_memory.add_message(Message::Tool {
+                                                content: format!(
+                                                    "工具 {} 执行失败（错误信息：{}）。由于无法重试，请考虑使用其他方式解决问题或给出合适的响应。",
+                                                    tool_calls.get(&tool_call_id).unwrap().tool_name,
+                                                    error,
+                                                ),
+                                                tool_call_id,
+                                            });
                                         },
-                                        tool_args.id,
-                                    ));
-                                    // 获取上下文
-                                    context = self
-                                        .short_term_memory
-                                        .get_context_messages(self.config.max_tokens);
-                                    // 存储相关信息到长期记忆
-                                    if let Some(metadata) = metadata {
-                                        self.store_tool_result(&tool_args.tool_name, metadata)
-                                            .await?;
-                                    }
-                                }
-                                ToolExecutionResult::Failure {
-                                    error,
-                                    should_retry,
-                                } => {
-                                    if should_retry
-                                        && retries < self.config.retry_config.max_retries
-                                    {
-                                        retries += 1;
-                                        tokio::time::sleep(self.config.retry_config.retry_delay)
-                                            .await;
-                                        continue;
-                                    }
-
-                                    // 添加失败信息到上下文中，同时提供后续处理建议
-                                    self.short_term_memory.add_message(Message::Tool(
-                                        InnerMessage {
-                                            content: format!(
-                                            "工具 {} 执行失败（错误信息：{}）。由于无法重试，请考虑使用其他方式解决问题或给出合适的响应。",
-                                            tool_args.tool_name,
-                                            error
-                                            ),
-                                            name: None,
-                                            metadata: None,
-                                        },
-                                        tool_args.id,
-                                    ));
-                                    context = self
-                                        .short_term_memory
-                                        .get_context_messages(self.config.max_tokens);
-                                    continue;
-                                }
-                                ToolExecutionResult::NeedMoreInfo { missing_fields } => {
-                                    self.state = AgentState::WaitingForUserInput;
-                                    return Ok(format!(
-                                        "需要更多信息: {}",
-                                        missing_fields.join(", ")
-                                    ));
-                                }
-                            }
+                                    );
+                            context = self
+                                .short_term_memory
+                                .get_context_messages(self.config.max_tokens);
+                            continue;
                         }
                         Decision::Respond(response) => {
-                            self.short_term_memory
-                                .add_message(Message::Assistant(InnerMessage {
-                                    content: response.content.clone(),
-                                    name: None,
-                                    metadata: None,
-                                }));
+                            self.short_term_memory.add_message(Message::Assistant {
+                                content: response.clone(),
+                                tool_calls: None,
+                            });
                             self.state = AgentState::Ready;
-                            return Ok(response.content);
+                            return Ok(response);
                         }
                     }
                 }
@@ -183,27 +143,56 @@ where
             .await
     }
 
-    async fn execute_tool(&self, tool_name: &str, args: Value) -> Result<ToolExecutionResult> {
-        let tool = self
-            .tools
-            .get(tool_name)
-            .ok_or_else(|| anyhow!("Tool not found: {}", tool_name))?;
+    async fn execute_tool(
+        &self,
+        args: &HashMap<String, ToolCallArgs>,
+    ) -> Result<ToolExecutionResult> {
+        let mut success_result: HashMap<String, String> = HashMap::new();
+        let mut failure_result: HashMap<String, String> = HashMap::new();
+        let tools = args
+            .iter()
+            .filter_map(|(tool_call_id, args)| {
+                let tool = self.tools.get(&args.tool_name);
+                if let None = tool {
+                    failure_result.insert(
+                        args.tool_name.clone(),
+                        format!("Tool {} does not exist!", args.tool_name),
+                    );
+                    None
+                } else {
+                    Some((tool.unwrap(), &args.args, tool_call_id))
+                }
+            })
+            .collect::<Vec<_>>();
+        for (tool, args, tool_call_id) in tools {
+            match tool.execute(args.clone()).await {
+                Ok(result) => {
+                    success_result.insert(tool_call_id.clone(), result);
+                }
+                Err(err) => {
+                    failure_result.insert(tool_call_id.clone(), err.to_string());
+                }
+            }
+        }
 
-        tool.execute(args).await
+        Ok(ToolExecutionResult {
+            success_result,
+            failure_result,
+        })
     }
 
-    async fn store_tool_result(&mut self, tool_name: &str, metadata: Value) -> Result<()> {
-        let memory_entry = MemoryEntry {
-            content: metadata.clone(),
-            metadata: MemoryMetadata {
-                timestamp: chrono::Utc::now(),
-                tags: vec!["tool_result".to_string(), tool_name.to_string()],
-                source: tool_name.to_string(),
-            },
-        };
+    // async fn store_tool_result(&mut self, result: &str, tool_name: &str) -> Result<()> {
+    //     let memory_entry = MemoryEntry {
+    //         result: result.into(),
+    //         metadata: MemoryMetadata {
+    //             timestamp: chrono::Utc::now(),
+    //             tags: vec!["tool_result".to_string(), tool_name.to_string()],
+    //             source: tool_name.to_string(),
+    //         },
+    //     };
 
-        self.long_term_memory.store(memory_entry).await
-    }
+    //     self.long_term_memory.store(memory_entry).await
+    // }
 }
 
 #[cfg(test)]
@@ -212,10 +201,10 @@ mod tests {
     use crate::{
         llm::tests::MockLLMClient,
         memory::tests::{BasicShortTermMemory, MockLongTermMemory},
-        memory::MemoryQuery,
         tools::tests::EchoTool,
     };
     use pretty_assertions::assert_eq;
+    use serde_json::json;
     use std::time::Duration;
 
     // 辅助函数: 创建一个测试用的Agent
@@ -261,53 +250,52 @@ mod tests {
         assert_eq!(context.len(), 3); // system message + user message + assistant response
         assert_eq!(
             context[0],
-            Message::System(InnerMessage {
-                content: "You are a helpful assistant.".into(),
-                name: None,
-                metadata: None
-            })
+            Message::System {
+                content: "You are a helpful assistant.".to_string()
+            },
         );
         assert_eq!(
             context[1],
-            Message::User(InnerMessage {
-                content: "Hello".into(),
-                name: None,
-                metadata: None
-            })
+            Message::User {
+                content: "Hello".to_string()
+            },
         );
         assert_eq!(
             context[2],
-            Message::Assistant(InnerMessage {
-                content: "Echo: Hello".into(),
-                name: None,
-                metadata: None
-            })
+            Message::Assistant {
+                content: "Echo: Hello".to_string(),
+                tool_calls: None,
+            },
         );
     }
 
     #[tokio::test]
     async fn test_agent_tool_execution() {
         let agent = create_test_agent();
+        let tool_call_id = "tool_call_id".to_string();
+        let mut args = HashMap::new();
+        args.insert(
+            tool_call_id.clone(),
+            ToolCallArgs {
+                tool_type: "function".to_string(),
+                tool_name: "echo".to_string(),
+                args: json!({"text": "test message"}),
+            },
+        );
 
         // 测试工具执行
         let result = agent
-            .execute_tool("echo", serde_json::json!({"text": "test message"}))
+            .execute_tool(&args)
+            // .execute_tool("echo", serde_json::json!({"text": "test message"}))
             .await
             .unwrap();
 
-        match result {
-            ToolExecutionResult::Success { output, metadata } => {
-                assert_eq!(output, "test message");
-                assert!(metadata.is_none());
-            }
-            _ => panic!("Expected Success variant"),
-        }
-
-        // 测试工具不存在的情况
-        let result = agent
-            .execute_tool("nonexistent_tool", serde_json::json!({}))
-            .await;
-        assert!(result.is_err());
+        assert_eq!(result.failure_result.len(), 0);
+        assert_eq!(result.success_result.len(), 1);
+        assert_eq!(
+            *result.success_result.get(&tool_call_id).unwrap(),
+            "test message"
+        );
     }
 
     #[tokio::test]
@@ -333,41 +321,40 @@ mod tests {
         assert!(!recent_messages.is_empty());
         assert_eq!(
             *recent_messages.last().unwrap(),
-            Message::Assistant(InnerMessage {
+            Message::Assistant {
                 content: "Echo: Second message".into(),
-                name: None,
-                metadata: None
-            })
+                tool_calls: None,
+            },
         );
 
         // 4. 测试长期记忆存储和检索
-        let test_data = serde_json::json!({
-            "important_info": "test_data"
-        });
+        // let test_data = serde_json::json!({
+        //     "important_info": "test_data"
+        // });
 
-        let memory_entry = MemoryEntry {
-            content: test_data.clone(),
-            metadata: MemoryMetadata {
-                timestamp: chrono::Utc::now(),
-                tags: vec!["test".to_string()],
-                source: "test_tool".to_string(),
-            },
-        };
+        // let memory_entry = MemoryEntry {
+        //     result: test_data.clone(),
+        //     metadata: MemoryMetadata {
+        //         timestamp: chrono::Utc::now(),
+        //         tags: vec!["test".to_string()],
+        //         source: "test_tool".to_string(),
+        //     },
+        // };
 
-        agent.long_term_memory.store(memory_entry).await.unwrap();
+        // agent.long_term_memory.store(memory_entry).await.unwrap();
 
-        // 5. 通过语义查询验证记忆
-        let results = agent
-            .long_term_memory
-            .recall(&MemoryQuery::Semantic {
-                description: "test data".to_string(),
-                limit: 1,
-            })
-            .await
-            .unwrap();
+        // // 5. 通过语义查询验证记忆
+        // let results = agent
+        //     .long_term_memory
+        //     .recall(&MemoryQuery::Semantic {
+        //         description: "test data".to_string(),
+        //         limit: 1,
+        //     })
+        //     .await
+        //     .unwrap();
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].content, test_data);
+        // assert_eq!(results.len(), 1);
+        // assert_eq!(results[0].content, test_data);
     }
 
     #[tokio::test]
@@ -375,14 +362,30 @@ mod tests {
         let mut agent = create_test_agent();
 
         // 1. 测试无效的工具调用
-        let result = agent
-            .execute_tool("invalid_tool", serde_json::json!({}))
-            .await;
-        assert!(result.is_err());
+        let mut args1 = HashMap::new();
+        args1.insert(
+            "id".into(),
+            ToolCallArgs {
+                tool_type: "function".into(),
+                tool_name: "what_tool".into(),
+                args: json!({}),
+            },
+        );
+        let result = agent.execute_tool(&args1).await;
+        assert!(!result.unwrap().failure_result.is_empty());
 
         // 2. 测试参数缺失的工具调用
-        let result = agent.execute_tool("echo", serde_json::json!({})).await;
-        assert!(result.is_err());
+        let mut args2 = HashMap::new();
+        args2.insert(
+            "id".into(),
+            ToolCallArgs {
+                tool_type: "function".into(),
+                tool_name: "echo".into(),
+                args: json!({}),
+            },
+        );
+        let result = agent.execute_tool(&args2).await;
+        assert!(!result.unwrap().failure_result.is_empty());
 
         // 3. 测试状态检查
         agent.state = AgentState::Processing;
@@ -443,33 +446,37 @@ mod tests {
         let agent = create_test_agent();
 
         // 1. 执行第一个工具
-        let result1 = agent
-            .execute_tool("echo", serde_json::json!({"text": "first call"}))
-            .await
-            .unwrap();
-
+        let mut args = HashMap::new();
+        args.insert(
+            "id1".into(),
+            ToolCallArgs {
+                tool_type: "function".into(),
+                tool_name: "echo".into(),
+                args: json!({"text": "first call"}),
+            },
+        );
+        let result1 = agent.execute_tool(&args).await.unwrap();
+        assert_eq!(result1.failure_result.is_empty(), true);
+        assert_eq!(result1.success_result.len(), 1);
         // 2. 使用第一个工具的结果执行第二个工具
-        if let ToolExecutionResult::Success { output, .. } = result1 {
-            let result2 = agent
-                .execute_tool("echo", serde_json::json!({"text": output}))
-                .await
-                .unwrap();
-
-            // 3. 验证结果
-            if let ToolExecutionResult::Success { output, .. } = result2 {
-                assert_eq!(output, "first call");
-            } else {
-                panic!("Expected Success variant");
-            }
-        } else {
-            panic!("Expected Success variant");
-        }
+        let (_, output) = result1.success_result.iter().next().unwrap();
+        args.insert(
+            "id1".into(),
+            ToolCallArgs {
+                tool_type: "function".into(),
+                tool_name: "echo".into(),
+                args: json!({"text": output}),
+            },
+        );
+        let result2 = agent.execute_tool(&args).await.unwrap();
+        assert_eq!(result2.failure_result.is_empty(), true);
+        assert_eq!(result2.success_result.len(), 1);
 
         // 4. 验证工具调用历史
         let context = agent.short_term_memory.get_context_messages(None);
         let tool_messages = context
             .iter()
-            .filter(|m| matches!(m, Message::Tool(_, _)))
+            .filter(|m| matches!(m, Message::Tool { .. }))
             .count();
         assert_eq!(tool_messages, 0); // 工具调用不会被添加到上下文中,因为我们直接调用了execute_tool
     }

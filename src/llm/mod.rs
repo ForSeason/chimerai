@@ -26,7 +26,6 @@ pub trait LLMClient: Send + Sync {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::types::AssistantResponse;
 
     #[derive(Debug, Default)]
     pub struct MockLLMClient;
@@ -45,16 +44,10 @@ pub(crate) mod tests {
             _tools: Vec<Box<dyn Tool>>,
             _max_tokens: Option<usize>,
         ) -> Result<Decision> {
-            if let Some(Message::User(inner)) = messages.last() {
-                Ok(Decision::Respond(AssistantResponse {
-                    content: format!("Echo: {}", inner.content),
-                    metadata: None,
-                }))
+            if let Some(Message::User { content }) = messages.last() {
+                Ok(Decision::Respond(format!("Echo: {}", content)))
             } else {
-                Ok(Decision::Respond(AssistantResponse {
-                    content: "No messages provided".to_string(),
-                    metadata: None,
-                }))
+                Ok(Decision::Respond("No messages provided".to_string()))
             }
         }
 
@@ -72,18 +65,16 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_mock_llm_client() {
         let client = MockLLMClient::new();
-        let message = Message::User(crate::types::InnerMessage {
+        let message = Message::User {
             content: "Hello".to_string(),
-            name: None,
-            metadata: None,
-        });
-        let messages = vec![message.clone()];
+        };
+        let messages = vec![message];
 
         let response = client.complete(&messages, vec![], Some(100)).await.unwrap();
 
         match response {
             Decision::Respond(response) => {
-                assert_eq!(response.content, "Echo: Hello");
+                assert_eq!(response, "Echo: Hello");
             }
             _ => panic!("Expected Respond variant"),
         }
@@ -97,7 +88,7 @@ pub(crate) mod tests {
         if let Some(Ok(decision)) = stream.next().await {
             match decision {
                 Decision::Respond(response) => {
-                    assert_eq!(response.content, "Echo: Hello");
+                    assert_eq!(response, "Echo: Hello");
                 }
                 _ => panic!("Expected Respond variant"),
             }

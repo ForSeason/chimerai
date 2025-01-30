@@ -1,65 +1,53 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub type ToolCalls = HashMap<String, ToolCallArgs>;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Message {
-    Developer(InnerMessage),
-    System(InnerMessage),
-    User(InnerMessage),
-    Assistant(InnerMessage),
-    Tool(InnerMessage, String),
+    Developer {
+        content: String,
+    },
+    System {
+        content: String,
+    },
+    User {
+        content: String,
+    },
+    Assistant {
+        content: String,
+        tool_calls: Option<ToolCalls>,
+    },
+    Tool {
+        content: String,
+        tool_call_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InnerMessage {
-    pub content: String,
-    pub name: Option<String>,
-    pub metadata: Option<HashMap<String, serde_json::Value>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallArgs {
-    pub id: String,
     pub tool_type: String,
     pub tool_name: String,
     pub args: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssistantResponse {
-    pub content: String,
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationRequest {
-    pub question: String,
-    pub context: Option<serde_json::Value>,
-}
-
 /// Agent 的决策类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Decision {
-    /// 执行工具调用
-    ExecuteTool(ToolCallArgs),
+    /// 执行工具调用, tool_call_id => args
+    ExecuteTool(String, ToolCalls),
     /// 直接响应用户
-    Respond(AssistantResponse),
+    Respond(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolExecutionResult {
-    Success {
-        output: String,
-        metadata: Option<serde_json::Value>,
-    },
-    Failure {
-        error: String,
-        should_retry: bool,
-    },
-    NeedMoreInfo {
-        missing_fields: Vec<String>,
-    },
+pub struct ToolExecutionResult {
+    // tool_call_id => output
+    pub success_result: HashMap<String, String>,
+    // tool_call_id => error_message
+    pub failure_result: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,11 +102,9 @@ mod tests {
 
     #[test]
     fn test_message_serialization() {
-        let message = Message::User(crate::types::InnerMessage {
-            content: "Hello".to_string(),
-            name: None,
-            metadata: None,
-        });
+        let message = Message::User {
+            content: "Hello".into(),
+        };
 
         let serialized = serde_json::to_string(&message).unwrap();
         let deserialized: Message = serde_json::from_str(&serialized).unwrap();

@@ -11,13 +11,13 @@ pub trait Tool: Send + Sync + Debug {
     fn name(&self) -> String;
 
     /// 工具的描述
-    fn description(&self) -> String;
+    fn description(&self) -> Option<String>;
 
     /// 工具参数的JSON Schema
-    fn args_schema(&self) -> Value;
+    fn args_schema(&self) -> Option<Value>;
 
     /// 执行工具
-    async fn execute(&self, args: Value) -> Result<ToolExecutionResult>;
+    async fn execute(&self, args: Value) -> Result<String>;
 
     /// 克隆工具
     fn box_clone(&self) -> Box<dyn Tool>;
@@ -50,33 +50,30 @@ pub(crate) mod tests {
             "echo".to_string()
         }
 
-        fn description(&self) -> String {
-            "A simple echo tool that returns the input text".to_string()
+        fn description(&self) -> Option<String> {
+            Some("A simple echo tool that returns the input text".to_string())
         }
 
-        fn args_schema(&self) -> Value {
-            serde_json::json!({
+        fn args_schema(&self) -> Option<Value> {
+            Some(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "The text to echo back"
+                        "description": "the text to echo back"
                     }
                 },
                 "required": ["text"]
-            })
+            }))
         }
 
-        async fn execute(&self, args: Value) -> Result<ToolExecutionResult> {
+        async fn execute(&self, args: Value) -> Result<String> {
             let text = args
                 .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("Missing 'text' argument"))?;
 
-            Ok(ToolExecutionResult::Success {
-                output: text.to_string(),
-                metadata: None,
-            })
+            Ok(text.to_string())
         }
 
         fn box_clone(&self) -> Box<dyn Tool> {
@@ -90,19 +87,13 @@ pub(crate) mod tests {
 
         // Test tool metadata
         assert_eq!(tool.name(), "echo");
-        assert!(!tool.description().is_empty());
+        assert!(!tool.description().is_none());
 
         // Test successful execution
         let args = serde_json::json!({"text": "Hello, World!"});
         let result = tool.execute(args).await.unwrap();
 
-        match result {
-            ToolExecutionResult::Success { output, metadata } => {
-                assert_eq!(output, "Hello, World!");
-                assert!(metadata.is_none());
-            }
-            _ => panic!("Expected Success variant"),
-        }
+        assert_eq!(result, "Hello, World!");
 
         // Test missing argument
         let args = serde_json::json!({});
