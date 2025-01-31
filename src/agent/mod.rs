@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use serde_json::json;
 use std::collections::HashMap;
 use tokio::time::timeout;
 
@@ -53,6 +52,25 @@ where
         self.tools.insert(tool.name(), Box::new(tool));
     }
 
+    /// 处理传入的消息，并根据消息内容进行相应的操作
+    ///
+    /// 1. 检查代理当前状态是否为Ready，如果不是则返回错误
+    /// 2. 将状态设置为Processing，表示正在处理消息
+    /// 3. 将用户的消息添加到短期记忆中
+    /// 4. 获取裁剪后的上下文消息，确保不超过最大token数
+    /// 5. 进入循环，最多重试max_retries次：
+    ///     a. 调用get_decision获取LLM的决策结果，并设置超时时间
+    ///     b. 处理决策结果：
+    ///         - 如果需要执行工具：
+    ///             * 将助手的回应和工具调用信息添加到短期记忆中
+    ///             * 执行所有指定的工具
+    ///             * 根据工具执行结果，更新短期记忆中的内容
+    ///         - 如果直接回应用户：
+    ///             * 将助手的消息添加到短期记忆中
+    ///             * 恢复代理状态为Ready
+    ///             * 返回响应消息
+    ///     c. 超时处理：增加重试次数或返回错误
+    /// 6. 循环结束后，如果超过重试次数则返回相应错误
     pub async fn handle_message(&mut self, message: String) -> Result<String> {
         // 1. 状态检查
         if !matches!(self.state, AgentState::Ready) {
@@ -143,6 +161,15 @@ where
             .await
     }
 
+    /// 执行一系列工具调用，并收集它们的结果。
+    ///
+    /// 该函数接收一组工具调用请求，每个请求包含工具名称及其相关参数。对每个工具进行执行后，将结果存储在一个哈希映射中，其中键为工具名称，值为执行结果。如果任何一个工具调用失败，整个函数返回错误信息。
+    ///
+    /// # 参数
+    /// * `tool_calls` - 一个包含多个`ToolCall`对象的向量，每个对象表示一次待执行的工具调用及其参数。
+    ///
+    /// # 返回值
+    /// 如果所有工具成功执行，则返回一个`Result<HashMap<String, String>>`，其中键为工具名称，值为相应的执行结果。如果任何工具调用失败，则返回包含错误信息的`Result::Err`。
     async fn execute_tool(
         &self,
         args: &HashMap<String, ToolCallArgs>,
