@@ -2,6 +2,8 @@
 name = "chimerai"
 version = "0.1.0"
 edition = "2021"
+description = "A package for quickly building AI agents."
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
