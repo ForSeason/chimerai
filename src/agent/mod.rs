@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use async_stream::stream;
+use futures::{Stream, StreamExt};
+use std::{collections::HashMap, pin::Pin};
 use tokio::time::timeout;
 
 use crate::{
@@ -15,7 +17,7 @@ where
     H: ShortTermMemory,
     L: LLMClient,
 {
-    long_term_memory: M,
+    long_term_memory: M, // not implemented yet
     short_term_memory: H,
     llm: L,
     tools: HashMap<String, Box<dyn Tool>>,
@@ -208,18 +210,183 @@ where
         })
     }
 
-    // async fn store_tool_result(&mut self, result: &str, tool_name: &str) -> Result<()> {
-    //     let memory_entry = MemoryEntry {
-    //         result: result.into(),
-    //         metadata: MemoryMetadata {
-    //             timestamp: chrono::Utc::now(),
-    //             tags: vec!["tool_result".to_string(), tool_name.to_string()],
-    //             source: tool_name.to_string(),
-    //         },
-    //     };
+    /// 处理消息，采用流式方式返回 Assistant 的回复
+    ///
+    /// 该方法的处理流程与 handle_message 类似：
+    /// 1. 状态检查、添加用户消息、获取上下文
+    /// 2. 调用 LLMClient::stream_complete 获取 Decision 流
+    /// 3. 实时将 Assistant 输出通过 channel 发出，同时累积完整回复
+    /// 4. 如果遇到 Decision::ExecuteTool，则执行工具调用、更新记忆和上下文，然后继续流式对话
+    /// 5. 当 Decision 为 Respond 时，将完整回复加入记忆，恢复状态为 Ready，并结束循环
+    ///
+    /// 返回一个异步流，该流每次 yield Assistant 的部分回复或错误信息。
+    pub async fn handle_message_stream<'a>(
+        &'a mut self,
+        message: String,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + 'a>>> {
+        // 1. 状态检查
+        if !matches!(self.state, AgentState::Ready) {
+            return Err(anyhow!("Agent is not in ready state"));
+        }
+        self.state = AgentState::Processing;
 
-    //     self.long_term_memory.store(memory_entry).await
-    // }
+        // 2. 添加用户消息到短期记忆
+        self.short_term_memory
+            .add_message(Message::User { content: message });
+
+        // 3. 获取裁剪后的上下文
+        let mut context = self
+            .short_term_memory
+            .get_context_messages(self.config.max_tokens);
+
+        // 为避免克隆 short_term_memory，我们直接借用 self.short_term_memory 和 self.state
+        let stm = &mut self.short_term_memory;
+        let state = &mut self.state;
+        let config = self.config.clone(); // config 一般比较小，可以克隆
+        let timeout_duration = self.config.timeout;
+        let max_retries = self.config.retry_config.max_retries;
+        let llm = &self.llm;
+        let tools: Vec<&Box<dyn Tool>> = self.tools.values().collect();
+
+        // 使用 async_stream::stream! 生成流，该闭包不使用 move，从而允许捕获 &mut stm、&mut state 等借用
+        let output_stream = stream! {
+            let mut retries = 0;
+            let mut full_response = String::new();
+            loop {
+                // 调用流式 LLM 方法
+                let stream_result = timeout(
+                    timeout_duration,
+                    llm.stream_complete(&context, tools.clone(), config.max_tokens),
+                )
+                .await;
+                let mut decision_stream = match stream_result {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(e)) => {
+                        yield Err(e);
+                        break;
+                    }
+                    Err(_) => {
+                        if retries < max_retries {
+                            retries += 1;
+                            continue;
+                        } else {
+                            yield Err(anyhow!("LLM request timed out"));
+                            break;
+                        }
+                    }
+                };
+
+                // 标记是否遇到工具调用
+                let mut tool_calls: Option<HashMap<String, ToolCallArgs>> = None;
+
+                // 遍历流中每个 Decision
+                while let Some(decision_result) = decision_stream.next().await {
+                    match decision_result {
+                        Ok(decision) => match decision {
+                            Decision::ExecuteTool(partial_response, tc_map) => {
+                                full_response.push_str(&partial_response);
+                                // 记录工具调用信息（多次调用时取最后一次）
+                                tool_calls = Some(tc_map.clone());
+                                yield Ok(partial_response.clone());
+                            }
+                            Decision::Respond(partial_response) => {
+                                full_response.push_str(&partial_response);
+                                yield Ok(partial_response.clone());
+                            }
+                        },
+                        Err(e) => {
+                            yield Err(e);
+                        }
+                    }
+                } // end while decision_stream
+
+                // 流结束后判断是否需要执行工具
+                if let Some(tc) = tool_calls {
+                    // 将 Assistant 的流式回复及工具调用信息加入记忆
+                    stm.add_message(Message::Assistant {
+                        content: full_response.clone(),
+                        tool_calls: Some(tc.clone()),
+                    });
+                    // 执行工具调用
+                    match Agent::<M, H, L>::execute_tool_static(&tc, tools.clone()).await {
+                        Ok(exec_result) => {
+                            // 成功工具响应
+                            for (tool_call_id, content) in exec_result.success_result {
+                                stm.add_message(Message::Tool {
+                                    content: content.clone(),
+                                    tool_call_id: tool_call_id.clone(),
+                                });
+                            }
+                            // 失败工具响应
+                            for (tool_call_id, error) in exec_result.failure_result {
+                                let err_msg = format!(
+                                    "工具 {} 执行失败（错误信息：{}）。",
+                                    tc.get(&tool_call_id).unwrap().tool_name,
+                                    error
+                                );
+                                stm.add_message(Message::Tool {
+                                    content: err_msg.clone(),
+                                    tool_call_id: tool_call_id.clone(),
+                                });
+                            }
+                            // 更新上下文，然后继续循环获取后续回复
+                            context = stm.get_context_messages(config.max_tokens);
+                            full_response.clear();
+                            // 重置 tool_calls 后继续
+                            continue;
+                        }
+                        Err(e) => {
+                            yield Err(e);
+                            break;
+                        }
+                    }
+                } else {
+                    // 如果没有工具调用，则认为回复已结束，更新记忆并恢复状态
+                    stm.add_message(Message::Assistant {
+                        content: full_response.clone(),
+                        tool_calls: None,
+                    });
+                    *state = AgentState::Ready;
+                    break;
+                }
+            } // end loop
+        };
+
+        Ok(Box::pin(output_stream))
+    }
+
+    // 为了在 spawned async 块中使用 execute_tool，我们提供一个静态版本包装原有方法
+    async fn execute_tool_static(
+        args: &HashMap<String, ToolCallArgs>,
+        tools: Vec<&Box<dyn Tool>>,
+    ) -> Result<ToolExecutionResult> {
+        let mut success_result: HashMap<String, String> = HashMap::new();
+        let mut failure_result: HashMap<String, String> = HashMap::new();
+        // 根据传入的工具调用参数，从 tools 中查找并执行
+        for (tool_call_id, tc_args) in args.iter() {
+            // 在 tools 中查找名称匹配的工具
+            let tool_opt = tools.iter().find(|t| t.name() == tc_args.tool_name);
+            if let Some(tool) = tool_opt {
+                match tool.execute(tc_args.args.clone()).await {
+                    Ok(result) => {
+                        success_result.insert(tool_call_id.clone(), result);
+                    }
+                    Err(e) => {
+                        failure_result.insert(tool_call_id.clone(), e.to_string());
+                    }
+                }
+            } else {
+                failure_result.insert(
+                    tool_call_id.clone(),
+                    format!("Tool {} does not exist!", tc_args.tool_name),
+                );
+            }
+        }
+        Ok(ToolExecutionResult {
+            success_result,
+            failure_result,
+        })
+    }
 }
 
 #[cfg(test)]

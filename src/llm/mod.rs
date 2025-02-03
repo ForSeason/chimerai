@@ -1,5 +1,8 @@
+use std::pin::Pin;
+
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::Stream;
 
 use crate::tools::Tool;
 use crate::types::{Decision, Message};
@@ -13,12 +16,12 @@ pub trait LLMClient: Send + Sync {
         max_tokens: Option<usize>,
     ) -> Result<Decision>;
 
-    // async fn stream_complete(
-    //     &self,
-    //     messages: &[Message],
-    //     tools: Vec<&Box<dyn Tool>>,
-    //     max_tokens: Option<usize>,
-    // ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>>;
+    async fn stream_complete(
+        &self,
+        messages: &[Message],
+        tools: Vec<&Box<dyn Tool>>,
+        max_tokens: Option<usize>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>>;
 }
 
 #[cfg(test)]
@@ -49,15 +52,15 @@ pub(crate) mod tests {
             }
         }
 
-        // async fn stream_complete(
-        //     &self,
-        //     messages: &[Message],
-        //     tools: Vec<&Box<dyn Tool>>,
-        //     max_tokens: Option<usize>,
-        // ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>> {
-        //     let response = self.complete(messages, tools, max_tokens).await?;
-        //     Ok(Box::pin(futures::stream::once(async move { Ok(response) })))
-        // }
+        async fn stream_complete(
+            &self,
+            messages: &[Message],
+            tools: Vec<&Box<dyn Tool>>,
+            max_tokens: Option<usize>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<Decision>> + Send>>> {
+            let response = self.complete(messages, tools, max_tokens).await?;
+            Ok(Box::pin(futures::stream::once(async move { Ok(response) })))
+        }
     }
 
     #[tokio::test]
