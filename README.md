@@ -35,9 +35,9 @@ impl Tool for SimpleTool {
         "simple_tool".to_string()
     }
 
-    async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value> {
+    async fn execute(&self, _args: serde_json::Value) -> Result<String> {
         // 执行逻辑...
-        Ok(serde_json::json!({"result": "success"}))
+        Ok("result".to_string())
     }
 }
 
@@ -55,6 +55,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agent.register_tool(SimpleTool);
 
     // 处理用户消息
+    let response = agent.handle_message("Hello! What can you do for me?".to_string()).await?;
+    println!("Agent Response: {}", response);
+
+    Ok(())
+}
+```
+
+---
+
+# Chimerai
+
+## Purpose of the Library:
+Chimerai is a Rust-based intelligent agent library designed to handle complex decision-making processes. It integrates large language models (LLMs), tool invocations, and memory management to perform various tasks and interactions, dynamically adjusting strategies
+as needed.
+
+## Usage Example:
+The following example demonstrates how to initialize and configure a Chimerai Agent, register tools, and process user messages.
+
+```rust
+use chimerai::{
+    Agent, LLMClient, ShortTermMemory, LongTermMemory, Tool,
+    types::{AgentConfig, Message},
+};
+
+// Assume we have implementations of an LLM client, short-term memory, and long-term memory
+struct SimpleLLM;
+impl LLMClient for SimpleLLM {
+     // Implementation details...
+}
+
+struct SimpleShortTermMemory;
+impl ShortTermMemory for SimpleShortTermMemory {
+     // Implementation details...
+}
+
+struct SimpleLongTermMemory;
+impl LongTermMemory for SimpleLongTermMemory {
+     // Implementation details...
+}
+
+// Assume we have a tool implementation
+struct SimpleTool;
+impl Tool for SimpleTool {
+    fn name(&self) -> String {
+         "simple_tool".to_string()
+     }
+
+    async fn execute(&self, _args: serde_json::Value) -> Result<String> {
+         // Execution logic...
+        Ok("result".to_string())
+     }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let llm = SimpleLLM;
+    let short_term_memory = SimpleShortTermMemory;
+    let long_term_memory = SimpleLongTermMemory;
+
+     // Initialize Agent
+    let mut agent = Agent::new(long_term_memory, short_term_memory, llm)
+         .with_config(AgentConfig::default().system_prompt("You are a helpful assistant."));
+
+     // Register tools
+    agent.register_tool(SimpleTool);
+
+     // Process user message
     let response = agent.handle_message("Hello! What can you do for me?".to_string()).await?;
     println!("Agent Response: {}", response);
 

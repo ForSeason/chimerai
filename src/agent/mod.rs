@@ -119,7 +119,7 @@ where
                                             self.short_term_memory.add_message(Message::Tool {
                                                 content: format!(
                                                     "工具 {} 执行失败（错误信息：{}）。由于无法重试，请考虑使用其他方式解决问题或给出合适的响应。",
-                                                    tool_calls.get(&tool_call_id).unwrap().tool_name,
+                                                    tool_calls.get(&tool_call_id).map(|t| t.tool_name.as_str()).unwrap_or(tool_call_id.as_str()),
                                                     error,
                                                 ),
                                                 tool_call_id,

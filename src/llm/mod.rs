@@ -1,3 +1,4 @@
+pub mod openai;
 use std::pin::Pin;
 
 use anyhow::Result;
